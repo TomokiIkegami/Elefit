@@ -1,4 +1,6 @@
-![Elefit logo](https://github.com/MiyakeYuuki/Elefit/blob/myspace_tomo/images/Elefit_icon.png "Elefit icon")
+<div align="center">
+    <img src="https://github.com/MiyakeYuuki/Elefit/blob/myspace_tomo/images/Elefit_icon.png" width="100px" alt="Elefit icon">
+</div>
 
 # What's elefit
 Elefit is a device used for DNA analysis preparation. It has a compact body, so easy to move.
