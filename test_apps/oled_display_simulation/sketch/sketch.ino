@@ -1,205 +1,231 @@
 #include <Wire.h>
 #include <U8g2lib.h>
 
+// ======================================================
+// ポート（ピン）割り当て定義
+// ======================================================
+#define PWM_PORT_M1_1 27   // ポンプA
+#define PWM_PORT_M2_1 26   // ポンプB
+#define PWM_PORT_M3_1 12   // ポンプC
+
+#define PWM_PORT_M4_1 0    // 6chポンプ右(R) 正転
+#define PWM_PORT_M4_2 2    // 6chポンプ右(R) 逆転
+#define PWM_PORT_M5_2 15   // 6chポンプ左(L) 正転
+#define PWM_PORT_M5_1 14   // 6chポンプ左(L) 逆転
+
+#define STEP_PORT_1   16   // モータ相 A　#要らない
+#define STEP_PORT_2   17   // モータ相 A'
+#define STEP_PORT_3   18   // モータ相 B
+#define STEP_PORT_4   19   // モータ相 B'
+
+#define LIMIT_SWITCH  34   // リミットスイッチ #要らない
+
+#define PIN_X         32   // ジョイスティックX
+#define PIN_Y         33   // ジョイスティックY
+#define PIN_SW        25   // ジョイスティックSW
+
+#define PIN_LED_FRONT 4    // 前方アクチュエータ
+#define PIN_LED_BACK  5    // 後方アクチュエータ #1つでいいらしい　5V　D系に接続
+
+#define DELAYTIME     8    // シミュレーション用に少し高速化　要らない
+#define ELEMENTS_NUM  26   //いったん無視
+
 U8G2_SSD1306_128X64_NONAME_F_HW_I2C u8g2(U8G2_R0, /* reset=*/ U8X8_PIN_NONE);
 
-const int PIN_X  = 32;
-const int PIN_Y  = 33;
-const int PIN_SW = 25;
+// ======================================================
+// 🌟短縮バージョン用時間設定 (単位：秒)
+// ======================================================
+unsigned long t_11=2, t_12=3, t_13=10, t_14=2; // Washing (本来は計700秒弱)
+unsigned long t_21=2, t_22=3, t_23=5,  t_24=5, t_25=1, t_26=2; // Loading (本来は計700秒強)
+unsigned long t_31=2, t_32=3, t_33=1,  t_34=4, t_35=1, t_36=5; // Collecting
+unsigned long t_41=2, t_42=5; // Discharge
 
-// アクチュエータ用LED
-const int PIN_LED_FRONT = 4;
-const int PIN_LED_BACK  = 5;
-
-// 🌟追加：ポンプ用LEDのピン設定
-const int PIN_LED_12CH  = 14;
-const int PIN_LED_PUMP1 = 27;
-const int PIN_LED_PUMP2 = 26;
-const int PIN_LED_PUMP3 = 12;
-
-enum ButtonState {
-  BTN_NONE, BTN_UP, BTN_DOWN, BTN_LEFT, BTN_RIGHT, BTN_ENTER
-};
-
-enum MenuPage {
-  PAGE_MAIN, PAGE_PHASE, PAGE_PUMP, PAGE_ACTUATOR
-};
-
+// --- 状態管理 ---
+enum MenuPage { PAGE_MAIN, PAGE_PHASE, PAGE_PUMP, PAGE_ACTUATOR };
 MenuPage currentPage = PAGE_MAIN;
 int cursorIndex = 0;
-
-// 🌟追加：4つのポンプが現在ONかOFFかを記憶する変数（最初はすべてOFF＝false）
 bool pumpStatus[4] = {false, false, false, false};
+unsigned long last_btn_time = 0;
 
-// 🌟変更：「operation」を「control」に変更
-const int MAIN_MENU_SIZE = 5;
 const char* mainMenu[] = {"1. phase", "2. pump control", "3. actuator control", "4. discharge", "5. close"};
-
-const int PHASE_MENU_SIZE = 5;
-const char* phaseMenu[] = {"all phase", "washing", "loading", "collecting", "loading & collecting"};
-
-const int PUMP_MENU_SIZE = 4;
+const char* phaseMenu[] = {"all phase", "washing", "loading", "collecting", "loading & col."};
 const char* pumpMenu[] = {"12ch pump", "pump1", "pump2", "pump3"};
 
+void(*resetFunc)(void) = 0;
+
+// ======================================================
+// 駆動関数
+// ======================================================
+
+void step_front(int step) {
+  digitalWrite(STEP_PORT_2, HIGH); digitalWrite(STEP_PORT_4, HIGH);
+  for (int i = 0; i < step; i++) {
+    digitalWrite(STEP_PORT_1, HIGH); delay(DELAYTIME);
+    digitalWrite(STEP_PORT_3, HIGH); delay(DELAYTIME);
+    digitalWrite(STEP_PORT_1, LOW);  delay(DELAYTIME);
+    digitalWrite(STEP_PORT_3, LOW);  delay(DELAYTIME);
+  }
+  digitalWrite(STEP_PORT_2, LOW); digitalWrite(STEP_PORT_4, LOW);
+}
+
+void step_back(int step) {
+  digitalWrite(STEP_PORT_2, HIGH); digitalWrite(STEP_PORT_4, HIGH);
+  for (int i = 0; i < step; i++) {
+    if (digitalRead(LIMIT_SWITCH) == HIGH) break; 
+    digitalWrite(STEP_PORT_3, HIGH); delay(DELAYTIME);
+    digitalWrite(STEP_PORT_1, HIGH); delay(DELAYTIME);
+    digitalWrite(STEP_PORT_3, LOW);  delay(DELAYTIME);
+    digitalWrite(STEP_PORT_1, LOW);  delay(DELAYTIME);
+  }
+  digitalWrite(STEP_PORT_2, LOW); digitalWrite(STEP_PORT_4, LOW);
+}
+
+void on_pump_dba(int id) {
+  if(id==1) digitalWrite(PWM_PORT_M1_1, HIGH);
+  if(id==2) digitalWrite(PWM_PORT_M2_1, HIGH);
+  if(id==3) digitalWrite(PWM_PORT_M3_1, HIGH);
+}
+void off_pump_dba() { digitalWrite(PWM_PORT_M1_1, LOW); digitalWrite(PWM_PORT_M2_1, LOW); digitalWrite(PWM_PORT_M3_1, LOW); }
+
+void on_pump_12ch(bool rev) {
+  if(!rev) { digitalWrite(PWM_PORT_M4_1, HIGH); digitalWrite(PWM_PORT_M5_2, HIGH); }
+  else     { digitalWrite(PWM_PORT_M4_2, HIGH); digitalWrite(PWM_PORT_M5_1, HIGH); }
+}
+void off_pump_12ch() { 
+  digitalWrite(PWM_PORT_M4_1, LOW); digitalWrite(PWM_PORT_M4_2, LOW);
+  digitalWrite(PWM_PORT_M5_1, LOW); digitalWrite(PWM_PORT_M5_2, LOW);
+}
+
+void pwm_pump_12ch(unsigned long run_time_sec) {
+  unsigned long start = millis();
+  while (millis() - start <= run_time_sec * 1000) {
+    on_pump_12ch(false); delay(200); // 脈動もシミュレーション用に高速化
+    off_pump_12ch();     delay(300);
+  }
+}
+
+// ======================================================
+// 各工程シーケンス
+// ======================================================
+
+void info(const char* m) { 
+  u8g2.clearBuffer(); u8g2.drawStr(10,35,m); u8g2.sendBuffer(); 
+  Serial.println(m); 
+}
+
+void washing() {
+  info("Washing...");
+  step_front(30); step_back(100);
+  on_pump_dba(1); delay(t_11 * 1000); off_pump_dba();
+  on_pump_12ch(false); delay(t_12 * 1000); off_pump_12ch();
+  pwm_pump_12ch(t_13);
+  on_pump_12ch(false); delay(t_14 * 1000); off_pump_12ch();
+}
+
+void loading() {
+  info("Loading...");
+  on_pump_dba(2); delay(t_21 * 1000); off_pump_dba();
+  on_pump_12ch(false); delay(t_22 * 1000); off_pump_12ch();
+  delay(t_23 * 1000);
+  on_pump_12ch(false); delay(t_24 * 1000); off_pump_12ch();
+  for(int i=0; i<2; i++) { // 回数も短縮
+    on_pump_dba(3); delay(t_25 * 1000); off_pump_dba();
+    on_pump_12ch(false); delay(t_26 * 1000); off_pump_12ch();
+  }
+}
+
+void collecting() {
+  info("Collecting...");
+  on_pump_dba(3); delay(t_31 * 1000); off_pump_dba();
+  on_pump_12ch(false); delay(t_32 * 1000); off_pump_12ch();
+  on_pump_12ch(true);  delay(t_33 * 1000); off_pump_12ch();
+  step_front(50); on_pump_12ch(false); delay(t_34 * 1000); off_pump_12ch();
+  on_pump_12ch(true);  delay(t_35 * 1000); off_pump_12ch();
+  step_back(50);  on_pump_12ch(false); delay(t_36 * 1000); off_pump_12ch();
+}
+
+void discharge() {
+  info("Discharge...");
+  step_front(20); step_back(50);
+  on_pump_dba(1); on_pump_dba(2); on_pump_dba(3);
+  delay(t_41 * 1000); off_pump_dba();
+  on_pump_12ch(false); delay(t_42 * 1000); off_pump_12ch();
+}
+
+void all_phase() { washing(); loading(); collecting(); info("All Done!"); delay(2000); }
+
+// ======================================================
+// メインループ
+// ======================================================
+
 void setup() {
-  Serial.begin(115200);
-  u8g2.begin();
-  analogReadResolution(10); 
-  pinMode(PIN_X, INPUT);
-  pinMode(PIN_Y, INPUT);
-  pinMode(PIN_SW, INPUT_PULLUP);
-  
-  pinMode(PIN_LED_FRONT, OUTPUT);
-  pinMode(PIN_LED_BACK, OUTPUT);
-  
-  // 🌟追加：ポンプ用LEDを出力モードに設定
-  pinMode(PIN_LED_12CH, OUTPUT);
-  pinMode(PIN_LED_PUMP1, OUTPUT);
-  pinMode(PIN_LED_PUMP2, OUTPUT);
-  pinMode(PIN_LED_PUMP3, OUTPUT);
+  Serial.begin(115200); u8g2.begin(); u8g2.setFont(u8g2_font_6x10_tr);
+  pinMode(PWM_PORT_M1_1, OUTPUT); pinMode(PWM_PORT_M2_1, OUTPUT); pinMode(PWM_PORT_M3_1, OUTPUT);
+  pinMode(PWM_PORT_M4_1, OUTPUT); pinMode(PWM_PORT_M4_2, OUTPUT);
+  pinMode(PWM_PORT_M5_1, OUTPUT); pinMode(PWM_PORT_M5_2, OUTPUT);
+  pinMode(STEP_PORT_1, OUTPUT);   pinMode(STEP_PORT_2, OUTPUT);
+  pinMode(STEP_PORT_3, OUTPUT);   pinMode(STEP_PORT_4, OUTPUT);
+  pinMode(PIN_LED_FRONT, OUTPUT); pinMode(PIN_LED_BACK, OUTPUT);
+  pinMode(LIMIT_SWITCH, INPUT_PULLUP); pinMode(PIN_SW, INPUT_PULLUP);
 }
-
-ButtonState getButton() {
-  int x = analogRead(PIN_X);
-  int y = analogRead(PIN_Y);
-  bool sw = !digitalRead(PIN_SW); 
-
-  if (sw) return BTN_ENTER;
-  if (x > 800) return BTN_LEFT;
-  if (x < 200) return BTN_RIGHT;
-  if (y > 800) return BTN_UP;
-  if (y < 200) return BTN_DOWN;
-  return BTN_NONE;
-}
-
-ButtonState lastBtn = BTN_NONE;
 
 void loop() {
-  ButtonState btn = getButton();
+  int x = analogRead(PIN_X), y = analogRead(PIN_Y);
+  bool sw = !digitalRead(PIN_SW);
   
-  if (currentPage == PAGE_ACTUATOR) {
-    // --- アクチュエータ画面の処理（変更なし） ---
-    if (btn == BTN_LEFT) {
-      digitalWrite(PIN_LED_FRONT, HIGH);
-      digitalWrite(PIN_LED_BACK, LOW);
-    } else if (btn == BTN_RIGHT) {
-      digitalWrite(PIN_LED_FRONT, LOW);
-      digitalWrite(PIN_LED_BACK, HIGH); 
-    } else {
-      digitalWrite(PIN_LED_FRONT, LOW);
-      digitalWrite(PIN_LED_BACK, LOW);
-    }
-
-    if (btn != lastBtn && (btn == BTN_ENTER || btn == BTN_DOWN)) {
-      digitalWrite(PIN_LED_FRONT, LOW);
-      digitalWrite(PIN_LED_BACK, LOW);
-      currentPage = PAGE_MAIN;
-      cursorIndex = 2; // 「3. actuator control」に戻る
-    }
-
-  } else {
-    // --- 通常のリストメニューの処理 ---
-    if (btn != BTN_NONE && btn != lastBtn) {
+  if (millis() - last_btn_time > 250) {
+    if (currentPage != PAGE_ACTUATOR) {
+      int size = (currentPage == PAGE_MAIN) ? 5 : (currentPage == PAGE_PHASE) ? 5 : 4;
+      if (y > 3500) { cursorIndex = (cursorIndex - 1 + size) % size; last_btn_time = millis(); }
+      if (y < 500)  { cursorIndex = (cursorIndex + 1) % size; last_btn_time = millis(); }
       
-      int currentMenuSize = 0;
-      if (currentPage == PAGE_MAIN) currentMenuSize = MAIN_MENU_SIZE;
-      else if (currentPage == PAGE_PHASE) currentMenuSize = PHASE_MENU_SIZE;
-      else if (currentPage == PAGE_PUMP) currentMenuSize = PUMP_MENU_SIZE;
-
-      if (btn == BTN_DOWN) {
-        cursorIndex++;
-        if (cursorIndex >= currentMenuSize) cursorIndex = 0;
-      }
-      if (btn == BTN_UP) {
-        cursorIndex--;
-        if (cursorIndex < 0) cursorIndex = currentMenuSize - 1;
-      }
-
-      // 決定（右 または 押し込み）を入力した時の処理
-      if (btn == BTN_ENTER || btn == BTN_RIGHT) {
+      if (sw || x < 500) { 
+        last_btn_time = millis();
         if (currentPage == PAGE_MAIN) {
-          // メインメニューからの画面遷移
           if (cursorIndex == 0) { currentPage = PAGE_PHASE; cursorIndex = 0; }
           else if (cursorIndex == 1) { currentPage = PAGE_PUMP; cursorIndex = 0; }
           else if (cursorIndex == 2) { currentPage = PAGE_ACTUATOR; cursorIndex = 0; }
-          
-        } else if (currentPage == PAGE_PUMP) {
-          // 🌟追加：ポンプ画面で決定を押すと、そのポンプのON/OFFが反転する
+          else if (cursorIndex == 3) { discharge(); }
+          else if (cursorIndex == 4) { resetFunc(); }
+        } 
+        else if (currentPage == PAGE_PHASE) {
+          if (cursorIndex == 0) all_phase();
+          else if (cursorIndex == 1) washing();
+          else if (cursorIndex == 2) loading();
+          else if (cursorIndex == 3) collecting();
+          else if (cursorIndex == 4) { loading(); collecting(); }
+        }
+        else if (currentPage == PAGE_PUMP) {
           pumpStatus[cursorIndex] = !pumpStatus[cursorIndex];
-          
-          // 変数の状態に合わせて実際のLEDを光らせる
-          digitalWrite(PIN_LED_12CH,  pumpStatus[0] ? HIGH : LOW);
-          digitalWrite(PIN_LED_PUMP1, pumpStatus[1] ? HIGH : LOW);
-          digitalWrite(PIN_LED_PUMP2, pumpStatus[2] ? HIGH : LOW);
-          digitalWrite(PIN_LED_PUMP3, pumpStatus[3] ? HIGH : LOW);
+          if(cursorIndex==0) { if(pumpStatus[0]) on_pump_12ch(false); else off_pump_12ch(); }
+          if(cursorIndex==1) digitalWrite(PWM_PORT_M1_1, pumpStatus[1]);
+          if(cursorIndex==2) digitalWrite(PWM_PORT_M2_1, pumpStatus[2]);
+          if(cursorIndex==3) digitalWrite(PWM_PORT_M3_1, pumpStatus[3]);
         }
       }
-
-      // 戻る（左）を入力した時の処理
-      if (btn == BTN_LEFT) {
-        if (currentPage != PAGE_MAIN) {
-          int prevPage = currentPage;
-          currentPage = PAGE_MAIN;
-          // 戻ったときに、元いたメニューの位置にカーソルを合わせてあげる親切設計
-          if (prevPage == PAGE_PHASE) cursorIndex = 0;
-          if (prevPage == PAGE_PUMP) cursorIndex = 1;
-        }
-      }
+      if (x > 3500 && currentPage != PAGE_MAIN) { currentPage = PAGE_MAIN; cursorIndex = 0; last_btn_time = millis(); }
     }
   }
-  
-  lastBtn = btn; 
 
-  // --- OLEDへの描画処理 ---
-  u8g2.clearBuffer();
-  
   if (currentPage == PAGE_ACTUATOR) {
-    u8g2.setFont(u8g2_font_6x10_tr);
-    u8g2.drawStr(0, 10, "[ 3. actuator ]");
-    u8g2.drawLine(0, 12, 128, 12);
-    
-    u8g2.setFont(u8g2_font_8x13_tr); 
-    if (btn == BTN_LEFT)  u8g2.drawStr(10, 35, "[FRONT]"); else u8g2.drawStr(10, 35, "<-FRONT");
-    if (btn == BTN_RIGHT) u8g2.drawStr(70, 35, "[BACK]");  else u8g2.drawStr(70, 35, "BACK->");
-    
-    u8g2.setFont(u8g2_font_6x10_tr);
-    u8g2.drawStr(35, 60, "(O) MENU"); 
-
-  } else {
-    u8g2.setFont(u8g2_font_6x10_tr);
-    const char** currentMenuData;
-    int menuSize;
-    const char* title;
-
-    if (currentPage == PAGE_MAIN) {
-      currentMenuData = mainMenu; menuSize = MAIN_MENU_SIZE; title = "- MAIN MENU -";
-    } else if (currentPage == PAGE_PHASE) {
-      currentMenuData = phaseMenu; menuSize = PHASE_MENU_SIZE; title = "[ 1. phase ]";
-    } else if (currentPage == PAGE_PUMP) {
-      currentMenuData = pumpMenu; menuSize = PUMP_MENU_SIZE; title = "[ 2. pump ]";
-    }
-
-    u8g2.drawStr(0, 10, title);
-    u8g2.drawLine(0, 12, 128, 12); 
-
-    int startY = 24; 
-    int lineHeight = 10; 
-
-    for (int i = 0; i < menuSize; i++) {
-      int y = startY + (i * lineHeight);
-      if (i == cursorIndex) u8g2.drawStr(0, y, ">");
-      u8g2.drawStr(10, y, currentMenuData[i]);
-      
-      // 🌟追加：ポンプ画面の時だけ、各項目の右側に現在のON/OFF状態を表示する
-      if (currentPage == PAGE_PUMP) {
-        if (pumpStatus[i] == true) {
-          u8g2.drawStr(90, y, "[ON]");
-        } else {
-          u8g2.drawStr(90, y, " OFF ");
-        }
-      }
-    }
+    digitalWrite(PIN_LED_FRONT, (x > 3500));
+    digitalWrite(PIN_LED_BACK, (x < 500));
+    if (sw) { currentPage = PAGE_MAIN; cursorIndex = 2; delay(300); }
   }
 
+  u8g2.clearBuffer();
+  if (currentPage == PAGE_ACTUATOR) {
+    u8g2.drawStr(0,10,"[ 3. Actuator ]"); u8g2.drawStr(10,40,"L:FRONT R:BACK");
+  } else {
+    const char* title = (currentPage == PAGE_MAIN) ? "- MAIN MENU -" : (currentPage == PAGE_PHASE) ? "[ 1. Phase ]" : "[ 2. Pump ]";
+    u8g2.drawStr(0,10,title);
+    const char** d = (currentPage == PAGE_MAIN) ? mainMenu : (currentPage == PAGE_PHASE) ? phaseMenu : pumpMenu;
+    int s = (currentPage == PAGE_MAIN) ? 5 : (currentPage == PAGE_PHASE) ? 5 : 4;
+    for (int i=0; i<s; i++) {
+      if (i == cursorIndex) u8g2.drawStr(0, 24+i*10, ">");
+      u8g2.drawStr(10, 24+i*10, d[i]);
+      if (currentPage == PAGE_PUMP) u8g2.drawStr(90, 24+i*10, pumpStatus[i] ? "[ON]" : "OFF");
+    }
+  }
   u8g2.sendBuffer();
 }
