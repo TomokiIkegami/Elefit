@@ -3,7 +3,6 @@
 #include <U8g2lib.h>
 #include <Arduino.h>
 
-// 追記：ボタン入力の結果をメインに伝えるための型
 enum Command { NONE, UP, DOWN, ENTER, BACK };
 
 class UI {
@@ -20,7 +19,7 @@ public:
 
     void setup() {
         u8g2.begin();
-        u8g2.setFont(u8g2_font_6x10_tr);
+        u8g2.setFont(u8g2_font_6x10_tr); // デフォルトフォント
         pinMode(pinSW, INPUT_PULLUP);
     }
 
@@ -28,9 +27,8 @@ public:
     int getY() { return analogRead(pinY); }
     bool isPressed() { return !digitalRead(pinSW); }
 
-    // 追記：入力状態を判定して「コマンド」として返す
     Command getCommand() {
-        if (millis() - lastAction < 250) return NONE; // チャタリング・連続入力防止
+        if (millis() - lastAction < 250) return NONE;
 
         int x = getX();
         int y = getY();
@@ -56,13 +54,17 @@ public:
         return NONE;
     }
 
+    // --- 修正：描画前に必ずフォントを標準サイズ(6x10)にセットする ---
+
     void drawStatus(const char* m) {
+        u8g2.setFont(u8g2_font_6x10_tr); // 追加：巨大化防止
         u8g2.clearBuffer();
         u8g2.drawStr(10, 35, m);
         u8g2.sendBuffer();
     }
 
     void drawMenu(const char* title, const char** items, int size, int cursor, bool* pumpStatus = nullptr) {
+        u8g2.setFont(u8g2_font_6x10_tr); // 追加：巨大化防止
         u8g2.clearBuffer();
         u8g2.drawStr(0, 10, title);
         for (int i = 0; i < size; i++) {

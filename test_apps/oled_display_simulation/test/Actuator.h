@@ -3,64 +3,77 @@
 
 #include <ESP32Servo.h>
 #include <Arduino.h>
+#include "Buzzer.h"
 
 class Actuator {
 private:
     Servo myservo;
     uint8_t pin;
     int currentAngle;
-    const int step = 2; 
-    const int smoothDelay = 15; // ゆっくり動かす時の待ち時間（大きいほど遅くなる）
+    const int step = 2;
+    const int smoothDelay = 15;
+    Buzzer* buzzer;
 
 public:
-    Actuator(uint8_t p) : pin(p), currentAngle(180) {}
+    // 起動時の計算上の起点を180に設定
+    Actuator(uint8_t p) : pin(p), currentAngle(180), buzzer(nullptr) {}
+
+    void setBuzzer(Buzzer& b) { buzzer = &b; }
 
     void setup() {
-        ESP32PWM::allocateTimer(0);
-        ESP32PWM::allocateTimer(1);
-        ESP32PWM::allocateTimer(2);
-        ESP32PWM::allocateTimer(3);
         myservo.setPeriodHertz(50);
-        myservo.attach(pin, 500, 2400); 
-        myservo.write(currentAngle); 
+        // 物理ピンに接続
+        myservo.attach(pin, 500, 2400);
+
+        // 現在の角度(180)を初期値として書き込み
+        myservo.write(currentAngle);
+        delay(100);
+
+        // 起動時に180度（Front）までゆっくり移動
+        moveSlowlyTo(180); 
     }
 
-    // ゆっくり指定の角度まで動かす内部関数
+    // 指定の角度まで音楽を鳴らしながら移動
     void moveSlowlyTo(int targetAngle) {
-        targetAngle = constrain(targetAngle, 0, 180); // 0-180度に制限
+        targetAngle = constrain(targetAngle, 0, 180);
         
         while (currentAngle != targetAngle) {
-            if (currentAngle < targetAngle) {
-                currentAngle++;
-            } else {
-                currentAngle--;
-            }
+            if (currentAngle < targetAngle) currentAngle++;
+            else currentAngle--;
+            
             myservo.write(currentAngle);
-            delay(smoothDelay); // ここでスピードを調整
+
+            // 待機中にBGMを更新
+            for (int i = 0; i < smoothDelay; i++) {
+                if (buzzer != nullptr) {
+                    buzzer->playDelfinoPlazaFull();
+                }
+                delay(1); 
+                yield();
+            }
         }
     }
 
-    // 各動作をゆっくり実行するように変更
     void front()  { moveSlowlyTo(180); }
-    void back()   { moveSlowlyTo(0);   }
-    void center() { moveSlowlyTo(90);  }
+    void back()   { moveSlowlyTo(0); }
+    void center() { moveSlowlyTo(90); }
 
-    // スティック右：0度から180度までキッチリ動かす
     void moveFront() {
         if (currentAngle < 180) {
             currentAngle += step;
-            if (currentAngle > 180) currentAngle = 180; // 180を超えたら180に固定
+            if (currentAngle > 180) currentAngle = 180;
             myservo.write(currentAngle);
         }
+        if (buzzer != nullptr) buzzer->playDelfinoPlazaFull();
     }
 
-    // スティック左：0度までキッチリ戻す
     void moveBack() {
         if (currentAngle > 0) {
             currentAngle -= step;
-            if (currentAngle < 0) currentAngle = 0;   // 0を下回ったら0に固定
+            if (currentAngle < 0) currentAngle = 0;
             myservo.write(currentAngle);
         }
+        if (buzzer != nullptr) buzzer->playDelfinoPlazaFull();
     }
 
     int getCurrentAngle() { return currentAngle; }
